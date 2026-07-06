@@ -14,7 +14,6 @@ Register pool once -> swap normally -> hook pulls Aqua USDC for that pool -> v4 
 - The hook implements Uniswap v4 `IHooks` from `v4-core`.
 - Only the configured v4 `PoolManager` can call `beforeSwap`.
 - Each v4 pool can be registered with an Aqua maker strategy.
-- Normal swaps use the registered pool config; swappers do not pass Aqua-specific instructions.
 - USDC can act as the hub token for multiple spoke pools such as `USDC/WETH` and `USDC/HYDX`.
 - Local and Base fork tests prove Aqua-funded v4 swaps settle through PoolManager.
 
