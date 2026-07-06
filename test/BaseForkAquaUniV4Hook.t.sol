@@ -113,10 +113,10 @@ contract BaseForkAquaUniV4HookTest is Test {
         deal(BASE_WETH, address(router), 10_000 ether);
         hydx.mint(address(router), 10_000 ether);
         router.modifyLiquidity(
-            wethPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 100 ether, salt: 0}), ""
+            wethPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 100 ether, salt: 0})
         );
         router.modifyLiquidity(
-            hydxPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 100 ether, salt: 0}), ""
+            hydxPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 100 ether, salt: 0})
         );
 
         address maker = address(0xA11CE);
@@ -136,8 +136,8 @@ contract BaseForkAquaUniV4HookTest is Test {
         uint256 takerHydxBefore = hydx.balanceOf(address(this));
 
         // When: swaps use empty hookData; the registered Aqua config funds USDC input for each pool.
-        router.swap(wethPool, _exactInputParams(wethPool, BASE_USDC, 1e6), address(this), "");
-        router.swap(hydxPool, _exactInputParams(hydxPool, BASE_USDC, 1e6), address(this), "");
+        router.swap(wethPool, _exactInputParams(wethPool, BASE_USDC, 1e6), address(this));
+        router.swap(hydxPool, _exactInputParams(hydxPool, BASE_USDC, 1e6), address(this));
 
         // Then: live Aqua USDC balances went down and real v4 swaps paid WETH/HYDX out.
         (uint248 wethAquaAfter,) = IAqua(BASE_AQUA).rawBalances(maker, address(hook), wethStrategyHash, BASE_USDC);
@@ -244,18 +244,18 @@ contract BaseForkAquaFundedSwapRouter {
         manager = manager_;
     }
 
-    function swap(PoolKey memory key, SwapParams memory params, address recipient, bytes memory hookData)
+    function swap(PoolKey memory key, SwapParams memory params, address recipient)
         external
         returns (BalanceDelta delta)
     {
-        delta = abi.decode(manager.unlock(abi.encode(uint8(1), key, params, recipient, hookData)), (BalanceDelta));
+        delta = abi.decode(manager.unlock(abi.encode(uint8(1), key, params, recipient)), (BalanceDelta));
     }
 
-    function modifyLiquidity(PoolKey memory key, ModifyLiquidityParams memory params, bytes memory hookData)
+    function modifyLiquidity(PoolKey memory key, ModifyLiquidityParams memory params)
         external
         returns (BalanceDelta delta)
     {
-        delta = abi.decode(manager.unlock(abi.encode(uint8(2), key, params, hookData)), (BalanceDelta));
+        delta = abi.decode(manager.unlock(abi.encode(uint8(2), key, params)), (BalanceDelta));
     }
 
     function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
@@ -263,16 +263,16 @@ contract BaseForkAquaFundedSwapRouter {
         uint8 action = abi.decode(rawData[:32], (uint8));
 
         if (action == 2) {
-            (, PoolKey memory liqKey, ModifyLiquidityParams memory liqParams, bytes memory liqHookData) =
-                abi.decode(rawData, (uint8, PoolKey, ModifyLiquidityParams, bytes));
-            (BalanceDelta liqDelta,) = manager.modifyLiquidity(liqKey, liqParams, liqHookData);
+            (, PoolKey memory liqKey, ModifyLiquidityParams memory liqParams) =
+                abi.decode(rawData, (uint8, PoolKey, ModifyLiquidityParams));
+            (BalanceDelta liqDelta,) = manager.modifyLiquidity(liqKey, liqParams, "");
             _settleOrTake(liqKey, liqDelta, address(this));
             return abi.encode(liqDelta);
         }
 
-        (, PoolKey memory swapKey, SwapParams memory swapParams, address recipient, bytes memory swapHookData) =
-            abi.decode(rawData, (uint8, PoolKey, SwapParams, address, bytes));
-        BalanceDelta swapDelta = manager.swap(swapKey, swapParams, swapHookData);
+        (, PoolKey memory swapKey, SwapParams memory swapParams, address recipient) =
+            abi.decode(rawData, (uint8, PoolKey, SwapParams, address));
+        BalanceDelta swapDelta = manager.swap(swapKey, swapParams, "");
         _settleOrTake(swapKey, swapDelta, recipient);
         return abi.encode(swapDelta);
     }

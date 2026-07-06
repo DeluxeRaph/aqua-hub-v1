@@ -26,12 +26,6 @@ contract AquaUniV4Hook is IHooks {
         uint256 maxPullPerSwap;
     }
 
-    enum AquaAction {
-        None,
-        Pull,
-        CheckBalance
-    }
-
     mapping(PoolId poolId => AquaPoolConfig config) public aquaPoolConfigs;
 
     constructor(IAqua aqua_, address poolManager_) {
@@ -99,11 +93,8 @@ contract AquaUniV4Hook is IHooks {
         onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        if (hookData.length > 0) {
-            _handleAquaAction(hookData);
-        } else {
-            _handleRegisteredPool(sender, key, params);
-        }
+        require(hookData.length == 0, "AquaUniV4Hook: hookData disabled");
+        _handleRegisteredPool(sender, key, params);
 
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
@@ -126,21 +117,6 @@ contract AquaUniV4Hook is IHooks {
 
     function _inputToken(PoolKey calldata key, SwapParams calldata params) internal pure returns (address) {
         return Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1);
-    }
-
-    function _handleAquaAction(bytes calldata hookData) internal {
-        (AquaAction action, address maker, bytes32 strategyHash, address token, uint256 amount, address recipient) =
-            abi.decode(hookData, (AquaAction, address, bytes32, address, uint256, address));
-
-        if (action == AquaAction.Pull) {
-            AQUA.pull(maker, strategyHash, token, amount, recipient);
-        } else if (action == AquaAction.CheckBalance) {
-            (uint248 balance, uint8 tokensCount) = AQUA.rawBalances(maker, address(this), strategyHash, token);
-            require(tokensCount > 0, "AquaUniV4Hook: inactive Aqua strategy");
-            require(balance >= amount, "AquaUniV4Hook: insufficient Aqua balance");
-        } else if (action != AquaAction.None) {
-            revert("AquaUniV4Hook: unknown action");
-        }
     }
 
     function _isPoolCurrency(PoolKey calldata key, address token) internal pure returns (bool) {

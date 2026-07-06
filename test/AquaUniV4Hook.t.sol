@@ -51,70 +51,37 @@ contract AquaUniV4HookTest is Test {
         assertFalse(permissions.afterSwapReturnDelta, "Then no afterSwap return delta risk");
     }
 
-    function testGivenPoolManagerBeforeSwap_WhenHookDataRequestsAquaPull_ThenHookPullsFromProperAquaAndReturnsNoDelta()
-        public
-    {
-        // Given: hookData requests hub-side liquidity from 1inch Aqua.
-        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 250 ether, 2);
-        bytes memory hookData =
-            abi.encode(AquaUniV4Hook.AquaAction.Pull, maker, strategyHash, hubAsset, 250 ether, taker);
-
-        // When: Uniswap v4 PoolManager invokes beforeSwap.
-        vm.prank(poolManager);
-        (bytes4 selector, BeforeSwapDelta delta, uint24 feeOverride) =
-            hook.beforeSwap(taker, pool, _swapParams(), hookData);
-
-        // Then: the hook delegates liquidity movement to Aqua, not local hub accounting.
-        assertEq(selector, IHooks.beforeSwap.selector, "Then beforeSwap selector is returned");
-        assertEq(BeforeSwapDelta.unwrap(delta), 0, "Then V1 does not alter swap deltas");
-        assertEq(feeOverride, 0, "Then V1 does not override fees");
-        assertEq(aqua.lastPullMaker(), maker, "Then Aqua maker is used");
-        assertEq(aqua.lastPullApp(), address(hook), "Then hook is the Aqua app/caller");
-        assertEq(aqua.lastPullStrategyHash(), strategyHash, "Then strategy hash is used");
-        assertEq(aqua.lastPullToken(), hubAsset, "Then hub-side token is pulled");
-        assertEq(aqua.lastPullAmount(), 250 ether, "Then requested amount is pulled");
-        assertEq(aqua.lastPullTo(), taker, "Then tokens are sent to target recipient");
-    }
-
-    function testGivenPoolManagerBeforeSwap_WhenHookDataRequestsAquaBalanceCheck_ThenHookReadsProperAquaBalance()
-        public
-    {
-        // Given: Aqua reports enough balance for the maker strategy.
-        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 300 ether, 2);
-        bytes memory hookData =
-            abi.encode(AquaUniV4Hook.AquaAction.CheckBalance, maker, strategyHash, hubAsset, 250 ether, address(0));
-
-        // When: PoolManager invokes beforeSwap for a balance-check action.
-        vm.prank(poolManager);
-        hook.beforeSwap(taker, pool, _swapParams(), hookData);
-
-        // Then: the call succeeds because the hook checked the proper Aqua balance key for this app/strategy.
-    }
-
     function testGivenSomeoneOtherThanPoolManager_WhenCallingBeforeSwap_ThenHookRejectsTheCall() public {
-        // Given: a direct caller is not the Uniswap v4 PoolManager.
-        bytes memory hookData = abi.encode(AquaUniV4Hook.AquaAction.Pull, maker, strategyHash, hubAsset, 1 ether, taker);
-
         // When / Then: direct callback access is rejected.
         vm.expectRevert("AquaUniV4Hook: caller is not PoolManager");
-        hook.beforeSwap(taker, pool, _swapParams(), hookData);
+        hook.beforeSwap(taker, pool, _swapParams(), "");
+    }
+
+    function testGivenNonEmptyHookData_WhenPoolManagerCallsBeforeSwap_ThenHookRejectsBecauseRegisteredPoolsOwnTheFlow()
+        public
+    {
+        // Given: the pool has a registered Aqua config and a caller tries to steer the hook with custom data.
+        hook.registerAquaPool(pool, maker, strategyHash, hubAsset, 500 ether);
+        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 2 ether, 2);
+
+        // When / Then: the hook rejects non-empty hookData because this prototype only supports registered-pool flow.
+        vm.expectRevert("AquaUniV4Hook: hookData disabled");
+        vm.prank(poolManager);
+        hook.beforeSwap(taker, pool, _swapParams(), abi.encode("manual route"));
     }
 
     function testGivenAquaBalanceIsTooSmall_WhenPoolManagerCallsBeforeSwap_ThenHookRejectsTheSwap() public {
-        // Given: Aqua reports less available balance than the hook requires.
-        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 100 ether, 2);
-        bytes memory hookData =
-            abi.encode(AquaUniV4Hook.AquaAction.CheckBalance, maker, strategyHash, hubAsset, 250 ether, address(0));
+        // Given: the registered pool requires more hub-token input than Aqua has available.
+        hook.registerAquaPool(pool, maker, strategyHash, hubAsset, 500 ether);
+        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 0.5 ether, 2);
 
         // When / Then: the hook rejects because proper Aqua balance is insufficient.
         vm.expectRevert("AquaUniV4Hook: insufficient Aqua balance");
         vm.prank(poolManager);
-        hook.beforeSwap(taker, pool, _swapParams(), hookData);
+        hook.beforeSwap(taker, pool, _swapParams(), "");
     }
 
-    function testGivenRegisteredAquaPool_WhenPoolManagerCallsBeforeSwapWithEmptyHookData_ThenHookChecksAquaBalanceFromPoolConfig()
-        public
-    {
+    function testGivenRegisteredAquaPool_WhenPoolManagerCallsBeforeSwap_ThenHookPullsAquaFromPoolConfig() public {
         // Given: the pool is registered once with a shared Aqua liquidity strategy.
         hook.registerAquaPool(pool, maker, strategyHash, hubAsset, 500 ether);
         aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 2 ether, 2);
@@ -123,10 +90,12 @@ contract AquaUniV4HookTest is Test {
         vm.prank(poolManager);
         (bytes4 selector, BeforeSwapDelta delta, uint24 feeOverride) = hook.beforeSwap(taker, pool, _swapParams(), "");
 
-        // Then: the hook uses stored pool config to check Aqua instead of requiring hookData instructions.
+        // Then: the hook uses stored pool config to pull Aqua instead of requiring hookData instructions.
         assertEq(selector, IHooks.beforeSwap.selector, "Then beforeSwap selector is returned");
         assertEq(BeforeSwapDelta.unwrap(delta), 0, "Then V1 does not alter swap deltas");
         assertEq(feeOverride, 0, "Then V1 does not override fees");
+        assertEq(aqua.lastPullToken(), hubAsset, "Then hub-side token is pulled");
+        assertEq(aqua.lastPullTo(), taker, "Then PoolManager sender receives Aqua input");
     }
 
     function testGivenRegisteredAquaPoolWithTooLittleAqua_WhenPoolManagerCallsBeforeSwapWithEmptyHookData_ThenHookRejects()
@@ -181,7 +150,7 @@ contract AquaUniV4HookTest is Test {
         usdc.mint(address(router), 1_000 ether);
         weth.mint(address(router), 1_000 ether);
         router.modifyLiquidity(
-            wethPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 10 ether, salt: 0}), ""
+            wethPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 10 ether, salt: 0})
         );
 
         deployer.registerAquaPool(swapHook, wethPool, maker, strategyHash, address(usdc), 100 ether);
@@ -194,8 +163,7 @@ contract AquaUniV4HookTest is Test {
             SwapParams({
                 zeroForOne: address(usdc) < address(weth), amountSpecified: -1 ether, sqrtPriceLimitX96: 4295128740
             }),
-            taker,
-            ""
+            taker
         );
 
         // Then: the hook pulled USDC from Aqua into the router and the v4 pool paid WETH to the taker.
@@ -264,18 +232,18 @@ contract AquaFundedSwapRouter {
         manager = manager_;
     }
 
-    function swap(PoolKey memory key, SwapParams memory params, address recipient, bytes memory hookData)
+    function swap(PoolKey memory key, SwapParams memory params, address recipient)
         external
         returns (BalanceDelta delta)
     {
-        delta = abi.decode(manager.unlock(abi.encode(uint8(1), key, params, recipient, hookData)), (BalanceDelta));
+        delta = abi.decode(manager.unlock(abi.encode(uint8(1), key, params, recipient)), (BalanceDelta));
     }
 
-    function modifyLiquidity(PoolKey memory key, ModifyLiquidityParams memory params, bytes memory hookData)
+    function modifyLiquidity(PoolKey memory key, ModifyLiquidityParams memory params)
         external
         returns (BalanceDelta delta)
     {
-        delta = abi.decode(manager.unlock(abi.encode(uint8(2), key, params, hookData)), (BalanceDelta));
+        delta = abi.decode(manager.unlock(abi.encode(uint8(2), key, params)), (BalanceDelta));
     }
 
     function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
@@ -283,16 +251,16 @@ contract AquaFundedSwapRouter {
         uint8 action = abi.decode(rawData[:32], (uint8));
 
         if (action == 2) {
-            (, PoolKey memory liqKey, ModifyLiquidityParams memory liqParams, bytes memory liqHookData) =
-                abi.decode(rawData, (uint8, PoolKey, ModifyLiquidityParams, bytes));
-            (BalanceDelta delta,) = manager.modifyLiquidity(liqKey, liqParams, liqHookData);
+            (, PoolKey memory liqKey, ModifyLiquidityParams memory liqParams) =
+                abi.decode(rawData, (uint8, PoolKey, ModifyLiquidityParams));
+            (BalanceDelta delta,) = manager.modifyLiquidity(liqKey, liqParams, "");
             _settleOrTake(liqKey, delta, address(this));
             return abi.encode(delta);
         }
 
-        (, PoolKey memory swapKey, SwapParams memory swapParams, address recipient, bytes memory swapHookData) =
-            abi.decode(rawData, (uint8, PoolKey, SwapParams, address, bytes));
-        BalanceDelta swapDelta = manager.swap(swapKey, swapParams, swapHookData);
+        (, PoolKey memory swapKey, SwapParams memory swapParams, address recipient) =
+            abi.decode(rawData, (uint8, PoolKey, SwapParams, address));
+        BalanceDelta swapDelta = manager.swap(swapKey, swapParams, "");
         _settleOrTake(swapKey, swapDelta, recipient);
         return abi.encode(swapDelta);
     }
