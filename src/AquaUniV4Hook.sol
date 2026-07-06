@@ -87,13 +87,12 @@ contract AquaUniV4Hook is IHooks {
         });
     }
 
-    function beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
+    function beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata)
         external
         override
         onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
-        require(hookData.length == 0, "AquaUniV4Hook: hookData disabled");
         _handleRegisteredPool(sender, key, params);
 
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);

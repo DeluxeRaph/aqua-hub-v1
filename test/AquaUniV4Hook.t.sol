@@ -57,17 +57,22 @@ contract AquaUniV4HookTest is Test {
         hook.beforeSwap(taker, pool, _swapParams(), "");
     }
 
-    function testGivenNonEmptyHookData_WhenPoolManagerCallsBeforeSwap_ThenHookRejectsBecauseRegisteredPoolsOwnTheFlow()
+    function testGivenExtraSwapCallerData_WhenPoolManagerCallsBeforeSwap_ThenHookIgnoresItAndUsesRegisteredPoolConfig()
         public
     {
-        // Given: the pool has a registered Aqua config and a caller tries to steer the hook with custom data.
+        // Given: the pool has a registered Aqua config and a caller includes unrelated swap data.
         hook.registerAquaPool(pool, maker, strategyHash, hubAsset, 500 ether);
         aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 2 ether, 2);
 
-        // When / Then: the hook rejects non-empty hookData because this prototype only supports registered-pool flow.
-        vm.expectRevert("AquaUniV4Hook: hookData disabled");
+        // When: PoolManager invokes beforeSwap with extra caller data.
         vm.prank(poolManager);
         hook.beforeSwap(taker, pool, _swapParams(), abi.encode("manual route"));
+
+        // Then: the extra data has no effect; the registered pool config owns the Aqua pull.
+        assertEq(aqua.lastPullMaker(), maker, "Then registered maker is used");
+        assertEq(aqua.lastPullStrategyHash(), strategyHash, "Then registered strategy hash is used");
+        assertEq(aqua.lastPullToken(), hubAsset, "Then registered shared token is pulled");
+        assertEq(aqua.lastPullTo(), taker, "Then PoolManager sender receives Aqua input");
     }
 
     function testGivenAquaBalanceIsTooSmall_WhenPoolManagerCallsBeforeSwap_ThenHookRejectsTheSwap() public {
