@@ -3,41 +3,41 @@ pragma solidity ^0.8.26;
 
 import {Test} from "forge-std/Test.sol";
 import {AquaUniV4Hook} from "../src/AquaUniV4Hook.sol";
-import {AquaHub} from "../src/AquaHub.sol";
+import {IAqua} from "@1inch/aqua/src/interfaces/IAqua.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
-
 import {BeforeSwapDelta} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
 
 contract AquaUniV4HookTest is Test {
     address poolManager = address(0x4444);
     address hubAsset = address(0x1000);
-    address spokeAssetA = address(0x2000);
-    address spokeAssetB = address(0x3000);
+    address spokeAsset = address(0x2000);
+    address maker = address(0xCAFE);
+    address taker = address(0xBEEF);
+    bytes32 strategyHash = keccak256("aqua-v4-spoke-strategy");
 
+    MockAqua aqua;
     AquaUniV4Hook hook;
-    PoolKey poolA;
-    PoolKey poolB;
+    PoolKey pool;
 
     function setUp() public {
-        hook = new AquaUniV4Hook(poolManager, Currency.wrap(hubAsset), 1_000 ether);
-        poolA = _poolKey(hubAsset, spokeAssetA);
-        poolB = _poolKey(hubAsset, spokeAssetB);
+        aqua = new MockAqua();
+        hook = new AquaUniV4Hook(IAqua(address(aqua)), poolManager);
+        pool = _poolKey(hubAsset, spokeAsset);
     }
 
-    function testGivenAquaUniV4Hook_WhenInspectingTypes_ThenItInheritsAquaHubAndUniswapV4Hooks() public view {
-        // Given: the hook is deployed as the contract we intend to use for connected pools.
-        AquaHub asAqua = AquaHub(address(hook));
+    function testGivenAquaUniV4Hook_WhenInspectingTypes_ThenItUsesProperOneInchAquaAndUniswapV4Hooks() public view {
+        // Given: the hook is deployed with the proper 1inch Aqua interface and v4 hook interface.
         IHooks asUniV4Hook = IHooks(address(hook));
 
-        // When: the contract is viewed through both inherited interfaces.
+        // When: the contract exposes its dependencies and permissions.
         Hooks.Permissions memory permissions = hook.getHookPermissions();
 
-        // Then: it is both an Aqua hub and a Uniswap v4 hook with only beforeSwap enabled.
-        assertEq(address(asAqua), address(hook), "Then hook is an AquaHub");
+        // Then: it points at proper 1inch Aqua, not a local AquaHub placeholder.
+        assertEq(address(hook.AQUA()), address(aqua), "Then hook points at proper 1inch Aqua");
         assertEq(address(asUniV4Hook), address(hook), "Then hook is an IHooks implementation");
         assertTrue(permissions.beforeSwap, "Then beforeSwap is enabled");
         assertFalse(permissions.afterSwap, "Then afterSwap is disabled for V1");
@@ -45,77 +45,85 @@ contract AquaUniV4HookTest is Test {
         assertFalse(permissions.afterSwapReturnDelta, "Then no afterSwap return delta risk");
     }
 
-    function testGivenConnectedSpokePool_WhenPoolManagerCallsBeforeSwapToDrawHubCapacity_ThenAquaUsageIncreasesAndV4ReturnsNoDelta() public {
-        // Given: pool A is connected as a spoke to the Aqua hub.
-        hook.connectPool(poolA, 700 ether);
+    function testGivenPoolManagerBeforeSwap_WhenHookDataRequestsAquaPull_ThenHookPullsFromProperAquaAndReturnsNoDelta() public {
+        // Given: hookData requests hub-side liquidity from 1inch Aqua.
+        bytes memory hookData = abi.encode(
+            AquaUniV4Hook.AquaAction.Pull,
+            maker,
+            strategyHash,
+            hubAsset,
+            250 ether,
+            taker
+        );
 
-        // When: Uniswap v4 PoolManager invokes beforeSwap and hookData asks Aqua to draw capacity.
+        // When: Uniswap v4 PoolManager invokes beforeSwap.
         vm.prank(poolManager);
         (bytes4 selector, BeforeSwapDelta delta, uint24 feeOverride) =
-            hook.beforeSwap(address(this), poolA, _swapParams(), abi.encode(uint8(0), 250 ether));
+            hook.beforeSwap(taker, pool, _swapParams(), hookData);
 
-        // Then: the v4 hook returns the expected selector and no custom swap delta.
+        // Then: the hook delegates liquidity movement to Aqua, not local hub accounting.
         assertEq(selector, IHooks.beforeSwap.selector, "Then beforeSwap selector is returned");
         assertEq(BeforeSwapDelta.unwrap(delta), 0, "Then V1 does not alter swap deltas");
         assertEq(feeOverride, 0, "Then V1 does not override fees");
-
-        // Then: Aqua hub accounting records shared hub-side capacity usage for pool A.
-        bytes32 poolAId = hook.poolId(poolA);
-        bytes32 poolBId = hook.poolId(poolB);
-        assertEq(hook.poolUsage(poolAId), 250 ether, "Then pool A usage increases");
-        assertEq(hook.poolUsage(poolBId), 0, "Then pool B usage stays zero");
-        assertEq(hook.totalUsage(), 250 ether, "Then global usage increases");
-        assertEq(hook.availableForPool(poolA), 450 ether, "Then pool A capacity shrinks");
-        assertEq(hook.availableGlobal(), 750 ether, "Then global hub capacity shrinks");
+        assertEq(aqua.lastPullMaker(), maker, "Then Aqua maker is used");
+        assertEq(aqua.lastPullApp(), address(hook), "Then hook is the Aqua app/caller");
+        assertEq(aqua.lastPullStrategyHash(), strategyHash, "Then strategy hash is used");
+        assertEq(aqua.lastPullToken(), hubAsset, "Then hub-side token is pulled");
+        assertEq(aqua.lastPullAmount(), 250 ether, "Then requested amount is pulled");
+        assertEq(aqua.lastPullTo(), taker, "Then tokens are sent to target recipient");
     }
 
-    function testGivenConnectedSpokeHasUsedCapacity_WhenPoolManagerCallsBeforeSwapToReleaseHubCapacity_ThenAquaUsageDecreases() public {
-        // Given: pool A has already drawn shared Aqua capacity.
-        hook.connectPool(poolA, 700 ether);
-        vm.prank(poolManager);
-        hook.beforeSwap(address(this), poolA, _swapParams(), abi.encode(uint8(0), 250 ether));
+    function testGivenPoolManagerBeforeSwap_WhenHookDataRequestsAquaBalanceCheck_ThenHookReadsProperAquaBalance() public {
+        // Given: Aqua reports enough balance for the maker strategy.
+        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 300 ether, 2);
+        bytes memory hookData = abi.encode(
+            AquaUniV4Hook.AquaAction.CheckBalance,
+            maker,
+            strategyHash,
+            hubAsset,
+            250 ether,
+            address(0)
+        );
 
-        // When: Uniswap v4 PoolManager invokes beforeSwap and hookData asks Aqua to release capacity.
+        // When: PoolManager invokes beforeSwap for a balance-check action.
         vm.prank(poolManager);
-        hook.beforeSwap(address(this), poolA, _swapParams(), abi.encode(uint8(1), 100 ether));
+        hook.beforeSwap(taker, pool, _swapParams(), hookData);
 
-        // Then: Aqua hub capacity is returned to the shared hub.
-        bytes32 poolAId = hook.poolId(poolA);
-        assertEq(hook.poolUsage(poolAId), 150 ether, "Then pool A usage decreases");
-        assertEq(hook.totalUsage(), 150 ether, "Then global usage decreases");
-        assertEq(hook.availableForPool(poolA), 550 ether, "Then pool A capacity is restored");
-        assertEq(hook.availableGlobal(), 850 ether, "Then global capacity is restored");
+        // Then: the call succeeds because the hook checked the proper Aqua balance key for this app/strategy.
     }
 
     function testGivenSomeoneOtherThanPoolManager_WhenCallingBeforeSwap_ThenHookRejectsTheCall() public {
-        // Given: pool A is connected to Aqua.
-        hook.connectPool(poolA, 700 ether);
+        // Given: a direct caller is not the Uniswap v4 PoolManager.
+        bytes memory hookData = abi.encode(
+            AquaUniV4Hook.AquaAction.Pull,
+            maker,
+            strategyHash,
+            hubAsset,
+            1 ether,
+            taker
+        );
 
-        // When / Then: a direct call that does not come from PoolManager is rejected.
+        // When / Then: direct callback access is rejected.
         vm.expectRevert("AquaUniV4Hook: caller is not PoolManager");
-        hook.beforeSwap(address(this), poolA, _swapParams(), abi.encode(uint8(0), 1 ether));
+        hook.beforeSwap(taker, pool, _swapParams(), hookData);
     }
 
-    function testGivenUnconnectedSpokePool_WhenPoolManagerCallsBeforeSwap_ThenAquaRejectsThePool() public {
-        // Given: pool A exists but was never connected to Aqua.
+    function testGivenAquaBalanceIsTooSmall_WhenPoolManagerCallsBeforeSwap_ThenHookRejectsTheSwap() public {
+        // Given: Aqua reports less available balance than the hook requires.
+        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 100 ether, 2);
+        bytes memory hookData = abi.encode(
+            AquaUniV4Hook.AquaAction.CheckBalance,
+            maker,
+            strategyHash,
+            hubAsset,
+            250 ether,
+            address(0)
+        );
 
-        // When / Then: even the real PoolManager cannot allocate hub capacity for an unconnected pool.
-        vm.expectRevert("AquaHub: pool not connected");
+        // When / Then: the hook rejects because proper Aqua balance is insufficient.
+        vm.expectRevert("AquaUniV4Hook: insufficient Aqua balance");
         vm.prank(poolManager);
-        hook.beforeSwap(address(this), poolA, _swapParams(), abi.encode(uint8(0), 1 ether));
-    }
-
-    function testGivenGlobalHubCapacityIsNearlyUsed_WhenAnotherConnectedPoolDrawsTooMuch_ThenAquaRejectsOversubscription() public {
-        // Given: two spoke pools share one Aqua hub and pool A consumes most global capacity.
-        hook.connectPool(poolA, 900 ether);
-        hook.connectPool(poolB, 900 ether);
-        vm.prank(poolManager);
-        hook.beforeSwap(address(this), poolA, _swapParams(), abi.encode(uint8(0), 900 ether));
-
-        // When / Then: pool B cannot draw more than the remaining global hub capacity.
-        vm.expectRevert("AquaHub: global capacity exceeded");
-        vm.prank(poolManager);
-        hook.beforeSwap(address(this), poolB, _swapParams(), abi.encode(uint8(0), 101 ether));
+        hook.beforeSwap(taker, pool, _swapParams(), hookData);
     }
 
     function _poolKey(address token0, address token1) internal view returns (PoolKey memory) {
@@ -132,5 +140,66 @@ contract AquaUniV4HookTest is Test {
 
     function _swapParams() internal pure returns (SwapParams memory) {
         return SwapParams({zeroForOne: true, amountSpecified: -1 ether, sqrtPriceLimitX96: 0});
+    }
+}
+
+contract MockAqua is IAqua {
+    address public lastPullMaker;
+    address public lastPullApp;
+    bytes32 public lastPullStrategyHash;
+    address public lastPullToken;
+    uint256 public lastPullAmount;
+    address public lastPullTo;
+
+
+    mapping(bytes32 key => uint248 balance) internal balances;
+    mapping(bytes32 key => uint8 tokensCount) internal tokenCounts;
+
+    function rawBalances(address maker, address app, bytes32 strategyHash, address token)
+        external
+        view
+        override
+        returns (uint248 balance, uint8 tokensCount)
+    {
+        bytes32 key = _key(maker, app, strategyHash, token);
+        return (balances[key], tokenCounts[key]);
+    }
+
+    function safeBalances(address, address, bytes32, address, address) external pure override returns (uint256, uint256) {
+        return (0, 0);
+    }
+
+    function ship(address, bytes calldata strategy, address[] calldata, uint256[] calldata)
+        external
+        pure
+        override
+        returns (bytes32 strategyHash)
+    {
+        return keccak256(strategy);
+    }
+
+    function dock(address, bytes32, address[] calldata) external pure override {}
+
+    function pull(address maker, bytes32 strategyHash, address token, uint256 amount, address to) external override {
+        lastPullMaker = maker;
+        lastPullApp = msg.sender;
+        lastPullStrategyHash = strategyHash;
+        lastPullToken = token;
+        lastPullAmount = amount;
+        lastPullTo = to;
+    }
+
+    function push(address, address, bytes32, address, uint256) external pure override {}
+
+    function setRawBalance(address maker, address app, bytes32 strategyHash, address token, uint248 balance, uint8 tokensCount)
+        external
+    {
+        bytes32 key = _key(maker, app, strategyHash, token);
+        balances[key] = balance;
+        tokenCounts[key] = tokensCount;
+    }
+
+    function _key(address maker, address app, bytes32 strategyHash, address token) internal pure returns (bytes32) {
+        return keccak256(abi.encode(maker, app, strategyHash, token));
     }
 }

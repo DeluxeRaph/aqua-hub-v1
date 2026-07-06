@@ -1,23 +1,28 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {AquaHub} from "./AquaHub.sol";
+import {IAqua} from "@1inch/aqua/src/interfaces/IAqua.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {Currency} from "v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation.sol";
 
-contract AquaUniV4Hook is AquaHub, IHooks {
+contract AquaUniV4Hook is IHooks {
+    IAqua public immutable AQUA;
     address public immutable poolManager;
 
-    uint8 internal constant ACTION_DRAW = 0;
-    uint8 internal constant ACTION_RELEASE = 1;
+    enum AquaAction {
+        None,
+        Pull,
+        CheckBalance
+    }
 
-    constructor(address poolManager_, Currency hubAsset_, uint256 globalCapacity_) AquaHub(hubAsset_, globalCapacity_) {
+    constructor(IAqua aqua_, address poolManager_) {
+        require(address(aqua_) != address(0), "AquaUniV4Hook: zero Aqua");
         require(poolManager_ != address(0), "AquaUniV4Hook: zero PoolManager");
+        AQUA = aqua_;
         poolManager = poolManager_;
     }
 
@@ -45,24 +50,32 @@ contract AquaUniV4Hook is AquaHub, IHooks {
         });
     }
 
-    function beforeSwap(address, PoolKey calldata key, SwapParams calldata, bytes calldata hookData)
+    function beforeSwap(address, PoolKey calldata, SwapParams calldata, bytes calldata hookData)
         external
         override
         onlyPoolManager
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         if (hookData.length > 0) {
-            (uint8 action, uint256 amount) = abi.decode(hookData, (uint8, uint256));
-            if (action == ACTION_DRAW) {
-                _drawHubCapacity(key, amount);
-            } else if (action == ACTION_RELEASE) {
-                _releaseHubCapacity(key, amount);
-            } else {
-                revert("AquaUniV4Hook: unknown action");
-            }
+            _handleAquaAction(hookData);
         }
 
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
+    function _handleAquaAction(bytes calldata hookData) internal {
+        (AquaAction action, address maker, bytes32 strategyHash, address token, uint256 amount, address recipient) =
+            abi.decode(hookData, (AquaAction, address, bytes32, address, uint256, address));
+
+        if (action == AquaAction.Pull) {
+            AQUA.pull(maker, strategyHash, token, amount, recipient);
+        } else if (action == AquaAction.CheckBalance) {
+            (uint248 balance, uint8 tokensCount) = AQUA.rawBalances(maker, address(this), strategyHash, token);
+            require(tokensCount > 0, "AquaUniV4Hook: inactive Aqua strategy");
+            require(balance >= amount, "AquaUniV4Hook: insufficient Aqua balance");
+        } else if (action != AquaAction.None) {
+            revert("AquaUniV4Hook: unknown action");
+        }
     }
 
     function beforeInitialize(address, PoolKey calldata, uint160) external pure override returns (bytes4) {
