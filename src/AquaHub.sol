@@ -1,61 +1,77 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
-import {MockERC20} from "./mocks/MockERC20.sol";
+import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
 
-contract AquaHub {
-    MockERC20 public immutable hubAsset;
+abstract contract AquaHub {
+    using PoolIdLibrary for PoolKey;
+
+    Currency public immutable hubAsset;
     uint256 public immutable globalCapacity;
     uint256 public totalUsage;
 
-    mapping(address => bool) public isConnectedSpoke;
-    mapping(address => uint256) public spokeCapacity;
-    mapping(address => uint256) public spokeUsage;
+    mapping(bytes32 poolId => bool connected) public isConnectedPool;
+    mapping(bytes32 poolId => uint256 capacity) public poolCapacity;
+    mapping(bytes32 poolId => uint256 usage) public poolUsage;
 
-    constructor(MockERC20 hubAsset_, uint256 globalCapacity_) {
+    constructor(Currency hubAsset_, uint256 globalCapacity_) {
         hubAsset = hubAsset_;
         globalCapacity = globalCapacity_;
     }
 
-    function connectSpoke(address spoke, uint256 capacity) external {
-        require(spoke != address(0), "AquaHub: zero spoke");
-        isConnectedSpoke[spoke] = true;
-        spokeCapacity[spoke] = capacity;
+    function connectPool(PoolKey memory key, uint256 capacity) public virtual {
+        require(_poolContainsHubAsset(key), "AquaHub: pool missing hub asset");
+
+        bytes32 id = poolId(key);
+        isConnectedPool[id] = true;
+        poolCapacity[id] = capacity;
     }
 
-    function allocateHubAsset(address to, uint256 amount) external {
-        _requireConnectedSpoke(msg.sender);
-        require(totalUsage + amount <= globalCapacity, "AquaHub: global capacity exceeded");
-        require(spokeUsage[msg.sender] + amount <= spokeCapacity[msg.sender], "AquaHub: spoke capacity exceeded");
-
-        spokeUsage[msg.sender] += amount;
-        totalUsage += amount;
-        hubAsset.transfer(to, amount);
+    function poolId(PoolKey memory key) public pure returns (bytes32) {
+        PoolId id = key.toId();
+        return PoolId.unwrap(id);
     }
 
-    function releaseHubAsset(uint256 amount) external {
-        _requireConnectedSpoke(msg.sender);
-        require(spokeUsage[msg.sender] >= amount, "AquaHub: release exceeds usage");
-
-        spokeUsage[msg.sender] -= amount;
-        totalUsage -= amount;
-    }
-
-    function availableGlobal() external view returns (uint256) {
+    function availableGlobal() public view returns (uint256) {
         return globalCapacity > totalUsage ? globalCapacity - totalUsage : 0;
     }
 
-    function availableForSpoke(address spoke) external view returns (uint256) {
-        if (!isConnectedSpoke[spoke]) return 0;
+    function availableForPool(PoolKey memory key) public view returns (uint256) {
+        bytes32 id = poolId(key);
+        if (!isConnectedPool[id]) return 0;
 
-        uint256 localAvailable = spokeCapacity[spoke] > spokeUsage[spoke]
-            ? spokeCapacity[spoke] - spokeUsage[spoke]
-            : 0;
-        uint256 globalAvailable = globalCapacity > totalUsage ? globalCapacity - totalUsage : 0;
+        uint256 localAvailable = poolCapacity[id] > poolUsage[id] ? poolCapacity[id] - poolUsage[id] : 0;
+        uint256 globalAvailable = availableGlobal();
         return localAvailable < globalAvailable ? localAvailable : globalAvailable;
     }
 
-    function _requireConnectedSpoke(address spoke) internal view {
-        require(isConnectedSpoke[spoke], "AquaHub: spoke not connected");
+    function _drawHubCapacity(PoolKey memory key, uint256 amount) internal {
+        bytes32 id = poolId(key);
+        _requireConnectedPool(id);
+        require(totalUsage + amount <= globalCapacity, "AquaHub: global capacity exceeded");
+        require(poolUsage[id] + amount <= poolCapacity[id], "AquaHub: pool capacity exceeded");
+
+        poolUsage[id] += amount;
+        totalUsage += amount;
+    }
+
+    function _releaseHubCapacity(PoolKey memory key, uint256 amount) internal {
+        bytes32 id = poolId(key);
+        _requireConnectedPool(id);
+        require(poolUsage[id] >= amount, "AquaHub: release exceeds usage");
+
+        poolUsage[id] -= amount;
+        totalUsage -= amount;
+    }
+
+    function _requireConnectedPool(bytes32 id) internal view {
+        require(isConnectedPool[id], "AquaHub: pool not connected");
+    }
+
+    function _poolContainsHubAsset(PoolKey memory key) internal view returns (bool) {
+        return Currency.unwrap(key.currency0) == Currency.unwrap(hubAsset)
+            || Currency.unwrap(key.currency1) == Currency.unwrap(hubAsset);
     }
 }
