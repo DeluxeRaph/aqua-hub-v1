@@ -11,7 +11,7 @@ AquaUniV4Hook
   └─ beforeSwap can use registered pool config or manual hookData to check/pull Aqua liquidity
 ```
 
-Important: the previous local `AquaHub` placeholder has been removed. The hook now imports:
+The hook imports:
 
 ```solidity
 import {IAqua} from "@1inch/aqua/src/interfaces/IAqua.sol";
