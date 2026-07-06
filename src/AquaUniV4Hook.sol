@@ -5,13 +5,26 @@ import {IAqua} from "@1inch/aqua/src/interfaces/IAqua.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
+import {PoolId, PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
+import {Currency} from "v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "v4-core/src/types/BeforeSwapDelta.sol";
 import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation.sol";
 
 contract AquaUniV4Hook is IHooks {
+    using PoolIdLibrary for PoolKey;
+
     IAqua public immutable AQUA;
     address public immutable poolManager;
+    address public immutable owner;
+
+    struct AquaPoolConfig {
+        bool enabled;
+        address maker;
+        bytes32 strategyHash;
+        address sharedToken;
+        uint256 maxPullPerSwap;
+    }
 
     enum AquaAction {
         None,
@@ -19,16 +32,46 @@ contract AquaUniV4Hook is IHooks {
         CheckBalance
     }
 
+    mapping(PoolId poolId => AquaPoolConfig config) public aquaPoolConfigs;
+
     constructor(IAqua aqua_, address poolManager_) {
         require(address(aqua_) != address(0), "AquaUniV4Hook: zero Aqua");
         require(poolManager_ != address(0), "AquaUniV4Hook: zero PoolManager");
         AQUA = aqua_;
         poolManager = poolManager_;
+        owner = msg.sender;
     }
 
     modifier onlyPoolManager() {
         require(msg.sender == poolManager, "AquaUniV4Hook: caller is not PoolManager");
         _;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "AquaUniV4Hook: caller is not owner");
+        _;
+    }
+
+    function registerAquaPool(
+        PoolKey calldata key,
+        address maker,
+        bytes32 strategyHash,
+        address sharedToken,
+        uint256 maxPullPerSwap
+    ) external onlyOwner {
+        require(maker != address(0), "AquaUniV4Hook: zero maker");
+        require(strategyHash != bytes32(0), "AquaUniV4Hook: zero strategy hash");
+        require(sharedToken != address(0), "AquaUniV4Hook: zero shared token");
+        require(maxPullPerSwap > 0, "AquaUniV4Hook: zero max pull");
+        require(_isPoolCurrency(key, sharedToken), "AquaUniV4Hook: shared token not in pool");
+
+        aquaPoolConfigs[key.toId()] = AquaPoolConfig({
+            enabled: true,
+            maker: maker,
+            strategyHash: strategyHash,
+            sharedToken: sharedToken,
+            maxPullPerSwap: maxPullPerSwap
+        });
     }
 
     function getHookPermissions() public pure returns (Hooks.Permissions memory) {
@@ -50,7 +93,7 @@ contract AquaUniV4Hook is IHooks {
         });
     }
 
-    function beforeSwap(address, PoolKey calldata, SwapParams calldata, bytes calldata hookData)
+    function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
         external
         override
         onlyPoolManager
@@ -58,9 +101,23 @@ contract AquaUniV4Hook is IHooks {
     {
         if (hookData.length > 0) {
             _handleAquaAction(hookData);
+        } else {
+            _handleRegisteredPool(key, params);
         }
 
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+    }
+
+    function _handleRegisteredPool(PoolKey calldata key, SwapParams calldata params) internal view {
+        AquaPoolConfig memory config = aquaPoolConfigs[key.toId()];
+        if (!config.enabled) return;
+
+        uint256 amountNeeded = _abs(params.amountSpecified);
+        require(amountNeeded <= config.maxPullPerSwap, "AquaUniV4Hook: max pull exceeded");
+
+        (uint248 balance, uint8 tokensCount) = AQUA.rawBalances(config.maker, address(this), config.strategyHash, config.sharedToken);
+        require(tokensCount > 0, "AquaUniV4Hook: inactive Aqua strategy");
+        require(balance >= amountNeeded, "AquaUniV4Hook: insufficient Aqua balance");
     }
 
     function _handleAquaAction(bytes calldata hookData) internal {
@@ -76,6 +133,14 @@ contract AquaUniV4Hook is IHooks {
         } else if (action != AquaAction.None) {
             revert("AquaUniV4Hook: unknown action");
         }
+    }
+
+    function _isPoolCurrency(PoolKey calldata key, address token) internal pure returns (bool) {
+        return token == Currency.unwrap(key.currency0) || token == Currency.unwrap(key.currency1);
+    }
+
+    function _abs(int256 amount) internal pure returns (uint256) {
+        return amount < 0 ? uint256(-amount) : uint256(amount);
     }
 
     function beforeInitialize(address, PoolKey calldata, uint160) external pure override returns (bytes4) {

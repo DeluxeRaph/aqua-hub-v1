@@ -126,6 +126,55 @@ contract AquaUniV4HookTest is Test {
         hook.beforeSwap(taker, pool, _swapParams(), hookData);
     }
 
+    function testGivenRegisteredAquaPool_WhenPoolManagerCallsBeforeSwapWithEmptyHookData_ThenHookChecksAquaBalanceFromPoolConfig()
+        public
+    {
+        // Given: the pool is registered once with a shared Aqua liquidity strategy.
+        hook.registerAquaPool(pool, maker, strategyHash, hubAsset, 500 ether);
+        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 2 ether, 2);
+
+        // When: a normal swap reaches beforeSwap with no user-supplied hookData.
+        vm.prank(poolManager);
+        (bytes4 selector, BeforeSwapDelta delta, uint24 feeOverride) = hook.beforeSwap(taker, pool, _swapParams(), "");
+
+        // Then: the hook uses stored pool config to check Aqua instead of requiring hookData instructions.
+        assertEq(selector, IHooks.beforeSwap.selector, "Then beforeSwap selector is returned");
+        assertEq(BeforeSwapDelta.unwrap(delta), 0, "Then V1 does not alter swap deltas");
+        assertEq(feeOverride, 0, "Then V1 does not override fees");
+    }
+
+    function testGivenRegisteredAquaPoolWithTooLittleAqua_WhenPoolManagerCallsBeforeSwapWithEmptyHookData_ThenHookRejects()
+        public
+    {
+        // Given: the pool is registered but Aqua has less shared-token balance than this swap needs.
+        hook.registerAquaPool(pool, maker, strategyHash, hubAsset, 500 ether);
+        aqua.setRawBalance(maker, address(hook), strategyHash, hubAsset, 0.5 ether, 2);
+
+        // When / Then: normal empty-hookData swaps still enforce Aqua availability.
+        vm.expectRevert("AquaUniV4Hook: insufficient Aqua balance");
+        vm.prank(poolManager);
+        hook.beforeSwap(taker, pool, _swapParams(), "");
+    }
+
+    function testGivenNonOwner_WhenRegisteringAquaPool_ThenHookRejects() public {
+        // Given: someone other than the deployer tries to configure pool-level Aqua liquidity.
+        address attacker = address(0xBAD);
+
+        // When / Then: registration is owner-gated.
+        vm.expectRevert("AquaUniV4Hook: caller is not owner");
+        vm.prank(attacker);
+        hook.registerAquaPool(pool, maker, strategyHash, hubAsset, 500 ether);
+    }
+
+    function testGivenSharedTokenIsNotPoolCurrency_WhenRegisteringAquaPool_ThenHookRejects() public {
+        // Given: a registration tries to attach an unrelated token to this v4 pool.
+        address unrelatedToken = address(0x9999);
+
+        // When / Then: the hook refuses configs that could pull unrelated Aqua liquidity.
+        vm.expectRevert("AquaUniV4Hook: shared token not in pool");
+        hook.registerAquaPool(pool, maker, strategyHash, unrelatedToken, 500 ether);
+    }
+
     function _poolKey(address token0, address token1) internal view returns (PoolKey memory) {
         address currency0 = token0 < token1 ? token0 : token1;
         address currency1 = token0 < token1 ? token1 : token0;

@@ -72,16 +72,15 @@ contract BaseForkAquaUniV4HookTest is Test {
         vm.stopPrank();
         assertEq(shippedHash, strategyHash, "Then live Aqua records the fork strategy hash");
 
-        bytes memory hookData = abi.encode(
-            AquaUniV4Hook.AquaAction.CheckBalance,
-            maker,
-            strategyHash,
-            address(usdc),
-            900 ether,
-            address(0)
-        );
+        deployer.registerAquaPool(hook, poolA, maker, strategyHash, address(usdc), 1_000 ether);
+        deployer.registerAquaPool(hook, poolB, maker, strategyHash, address(usdc), 1_000 ether);
+
+        // Then: direct swappers do not need to know Aqua hookData; both pools use registered config.
         vm.prank(BASE_V4_POOL_MANAGER);
-        hook.beforeSwap(address(this), poolA, _swapParams(), hookData);
+        hook.beforeSwap(address(this), poolA, _swapParams(), "");
+
+        vm.prank(BASE_V4_POOL_MANAGER);
+        hook.beforeSwap(address(this), poolB, _swapParams(), "");
     }
 
     function _poolKey(address tokenA, address tokenB, AquaUniV4Hook hook) internal pure returns (PoolKey memory) {
@@ -114,6 +113,17 @@ contract AquaHookCreate2Deployer {
 
     function deploy(bytes32 salt, IAqua aqua, address poolManager) external returns (AquaUniV4Hook hook) {
         hook = new AquaUniV4Hook{salt: salt}(aqua, poolManager);
+    }
+
+    function registerAquaPool(
+        AquaUniV4Hook hook,
+        PoolKey calldata key,
+        address maker,
+        bytes32 strategyHash,
+        address sharedToken,
+        uint256 maxPullPerSwap
+    ) external {
+        hook.registerAquaPool(key, maker, strategyHash, sharedToken, maxPullPerSwap);
     }
 }
 
