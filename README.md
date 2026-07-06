@@ -123,11 +123,3 @@ USDC / HYDX
 ```
 
 Then it swaps through both pools and asserts Aqua USDC balances decrease while the taker receives WETH and HYDX.
-
-## Important v4 deployment note
-
-Uniswap v4 hook permissions are encoded in the hook contract address. This prototype mines/deploys suitable hook addresses in tests. A real deployment still needs address mining so the deployed hook address has the `BEFORE_SWAP_FLAG` bit set.
-
-## Status
-
-This is a prototype proving the Aqua-funded v4 pool flow. It is not production-ready and still needs deeper security review, deployment scripts, and production liquidity/risk controls before mainnet use.
