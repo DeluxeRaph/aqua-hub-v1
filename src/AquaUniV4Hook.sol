@@ -93,7 +93,7 @@ contract AquaUniV4Hook is IHooks {
         });
     }
 
-    function beforeSwap(address, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
+    function beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
         external
         override
         onlyPoolManager
@@ -102,22 +102,30 @@ contract AquaUniV4Hook is IHooks {
         if (hookData.length > 0) {
             _handleAquaAction(hookData);
         } else {
-            _handleRegisteredPool(key, params);
+            _handleRegisteredPool(sender, key, params);
         }
 
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
 
-    function _handleRegisteredPool(PoolKey calldata key, SwapParams calldata params) internal view {
+    function _handleRegisteredPool(address sender, PoolKey calldata key, SwapParams calldata params) internal {
         AquaPoolConfig memory config = aquaPoolConfigs[key.toId()];
         if (!config.enabled) return;
+
+        require(config.sharedToken == _inputToken(key, params), "AquaUniV4Hook: shared token is not input");
 
         uint256 amountNeeded = _abs(params.amountSpecified);
         require(amountNeeded <= config.maxPullPerSwap, "AquaUniV4Hook: max pull exceeded");
 
-        (uint248 balance, uint8 tokensCount) = AQUA.rawBalances(config.maker, address(this), config.strategyHash, config.sharedToken);
+        (uint248 balance, uint8 tokensCount) =
+            AQUA.rawBalances(config.maker, address(this), config.strategyHash, config.sharedToken);
         require(tokensCount > 0, "AquaUniV4Hook: inactive Aqua strategy");
         require(balance >= amountNeeded, "AquaUniV4Hook: insufficient Aqua balance");
+        AQUA.pull(config.maker, config.strategyHash, config.sharedToken, amountNeeded, sender);
+    }
+
+    function _inputToken(PoolKey calldata key, SwapParams calldata params) internal pure returns (address) {
+        return Currency.unwrap(params.zeroForOne ? key.currency0 : key.currency1);
     }
 
     function _handleAquaAction(bytes calldata hookData) internal {

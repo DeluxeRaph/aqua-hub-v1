@@ -9,11 +9,15 @@ import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/src/libraries/Hooks.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
-import {SwapParams} from "v4-core/src/types/PoolOperation.sol";
+import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
+import {ModifyLiquidityParams, SwapParams} from "v4-core/src/types/PoolOperation.sol";
+import {CurrencySettler} from "v4-core/test/utils/CurrencySettler.sol";
 
 contract BaseForkAquaUniV4HookTest is Test {
     address constant BASE_AQUA = 0x499943E74FB0cE105688beeE8Ef2ABec5D936d31;
     address constant BASE_V4_POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
+    address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address constant BASE_WETH = 0x4200000000000000000000000000000000000006;
     uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
 
     function testGivenBaseFork_WhenDeployingAquaV4HookAndInitializingTwoPools_ThenItUsesLiveAquaAndUniswapV4PoolManager()
@@ -26,9 +30,9 @@ contract BaseForkAquaUniV4HookTest is Test {
         assertGt(BASE_V4_POOL_MANAGER.code.length, 0, "Given live v4 PoolManager code exists on Base");
 
         // Given: two local fork tokens that will be used as two connected spoke-pool assets.
-        MockERC20 usdc = new MockERC20("Fork USDC", "fUSDC");
-        MockERC20 spokeA = new MockERC20("Spoke A", "SPA");
-        MockERC20 spokeB = new MockERC20("Spoke B", "SPB");
+        BaseForkMockERC20 usdc = new BaseForkMockERC20("Fork USDC", "fUSDC");
+        BaseForkMockERC20 spokeA = new BaseForkMockERC20("Spoke A", "SPA");
+        BaseForkMockERC20 spokeB = new BaseForkMockERC20("Spoke B", "SPB");
 
         // Given: the Aqua hook is deployed to an address whose v4 permission bits enable only beforeSwap.
         AquaHookCreate2Deployer deployer = new AquaHookCreate2Deployer();
@@ -77,10 +81,112 @@ contract BaseForkAquaUniV4HookTest is Test {
 
         // Then: direct swappers do not need to know Aqua hookData; both pools use registered config.
         vm.prank(BASE_V4_POOL_MANAGER);
-        hook.beforeSwap(address(this), poolA, _swapParams(), "");
+        hook.beforeSwap(address(this), poolA, _exactInputParams(poolA, address(usdc), 1 ether), "");
 
         vm.prank(BASE_V4_POOL_MANAGER);
-        hook.beforeSwap(address(this), poolB, _swapParams(), "");
+        hook.beforeSwap(address(this), poolB, _exactInputParams(poolB, address(usdc), 1 ether), "");
+    }
+
+    function testGivenBaseForkWithRealUsdcWethAndHydx_WhenSwappingWithEmptyHookData_ThenAquaPullFundsBothPools()
+        public
+    {
+        // Given: a Base fork with live 1inch Aqua, live v4 PoolManager, real USDC/WETH, and local HYDX.
+        vm.createSelectFork("https://mainnet.base.org");
+        assertEq(block.chainid, 8453, "Given Base fork");
+        assertGt(BASE_AQUA.code.length, 0, "Given live Aqua code exists on Base");
+        assertGt(BASE_V4_POOL_MANAGER.code.length, 0, "Given live v4 PoolManager code exists on Base");
+        assertGt(BASE_USDC.code.length, 0, "Given real Base USDC exists");
+        assertGt(BASE_WETH.code.length, 0, "Given real Base WETH exists");
+
+        BaseForkMockERC20 hydx = new BaseForkMockERC20("Hydrex", "HYDX");
+        AquaHookCreate2Deployer deployer = new AquaHookCreate2Deployer();
+        bytes32 salt = deployer.findSalt(IAqua(BASE_AQUA), BASE_V4_POOL_MANAGER);
+        AquaUniV4Hook hook = deployer.deploy(salt, IAqua(BASE_AQUA), BASE_V4_POOL_MANAGER);
+        BaseForkAquaFundedSwapRouter router = new BaseForkAquaFundedSwapRouter(IPoolManager(BASE_V4_POOL_MANAGER));
+
+        PoolKey memory wethPool = _poolKey(BASE_USDC, BASE_WETH, hook);
+        PoolKey memory hydxPool = _poolKey(BASE_USDC, address(hydx), hook);
+        IPoolManager(BASE_V4_POOL_MANAGER).initialize(wethPool, SQRT_PRICE_1_1);
+        IPoolManager(BASE_V4_POOL_MANAGER).initialize(hydxPool, SQRT_PRICE_1_1);
+
+        deal(BASE_USDC, address(router), 10_000 ether);
+        deal(BASE_WETH, address(router), 10_000 ether);
+        hydx.mint(address(router), 10_000 ether);
+        router.modifyLiquidity(
+            wethPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 100 ether, salt: 0}), ""
+        );
+        router.modifyLiquidity(
+            hydxPool, ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: 100 ether, salt: 0}), ""
+        );
+
+        address maker = address(0xA11CE);
+        deal(BASE_USDC, maker, 2_000e6);
+        deal(BASE_WETH, maker, 1_000 ether);
+        hydx.mint(maker, 1_000 ether);
+        bytes32 wethStrategyHash =
+            _shipStrategy(maker, hook, BASE_USDC, BASE_WETH, 1_000e6, 100 ether, "base-real-usdc-weth");
+        bytes32 hydxStrategyHash =
+            _shipStrategy(maker, hook, BASE_USDC, address(hydx), 1_000e6, 100 ether, "base-real-usdc-hydx");
+        deployer.registerAquaPool(hook, wethPool, maker, wethStrategyHash, BASE_USDC, 100e6);
+        deployer.registerAquaPool(hook, hydxPool, maker, hydxStrategyHash, BASE_USDC, 100e6);
+
+        (uint248 wethAquaBefore,) = IAqua(BASE_AQUA).rawBalances(maker, address(hook), wethStrategyHash, BASE_USDC);
+        (uint248 hydxAquaBefore,) = IAqua(BASE_AQUA).rawBalances(maker, address(hook), hydxStrategyHash, BASE_USDC);
+        uint256 takerWethBefore = IERC20Like(BASE_WETH).balanceOf(address(this));
+        uint256 takerHydxBefore = hydx.balanceOf(address(this));
+
+        // When: swaps use empty hookData; the registered Aqua config funds USDC input for each pool.
+        router.swap(wethPool, _exactInputParams(wethPool, BASE_USDC, 1e6), address(this), "");
+        router.swap(hydxPool, _exactInputParams(hydxPool, BASE_USDC, 1e6), address(this), "");
+
+        // Then: live Aqua USDC balances went down and real v4 swaps paid WETH/HYDX out.
+        (uint248 wethAquaAfter,) = IAqua(BASE_AQUA).rawBalances(maker, address(hook), wethStrategyHash, BASE_USDC);
+        (uint248 hydxAquaAfter,) = IAqua(BASE_AQUA).rawBalances(maker, address(hook), hydxStrategyHash, BASE_USDC);
+        assertEq(uint256(wethAquaBefore - wethAquaAfter), 1e6, "Then WETH pool consumed Aqua USDC");
+        assertEq(uint256(hydxAquaBefore - hydxAquaAfter), 1e6, "Then HYDX pool consumed Aqua USDC");
+        assertGt(IERC20Like(BASE_WETH).balanceOf(address(this)), takerWethBefore, "Then taker receives real WETH");
+        assertGt(hydx.balanceOf(address(this)), takerHydxBefore, "Then taker receives HYDX");
+    }
+
+    function _shipStrategy(
+        address maker,
+        AquaUniV4Hook hook,
+        address usdc,
+        address spoke,
+        uint256 usdcAmount,
+        uint256 spokeAmount,
+        string memory label
+    ) internal returns (bytes32 strategyHash) {
+        bytes memory strategy = abi.encode(maker, address(hook), usdc, spoke, label);
+        strategyHash = keccak256(strategy);
+        address[] memory tokens = new address[](2);
+        tokens[0] = usdc;
+        tokens[1] = spoke;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = usdcAmount;
+        amounts[1] = spokeAmount;
+
+        vm.startPrank(maker);
+        IERC20Like(usdc).approve(BASE_AQUA, type(uint256).max);
+        IERC20Like(spoke).approve(BASE_AQUA, type(uint256).max);
+        bytes32 shippedHash = IAqua(BASE_AQUA).ship(address(hook), strategy, tokens, amounts);
+        vm.stopPrank();
+        assertEq(shippedHash, strategyHash, "Then live Aqua records strategy hash");
+    }
+
+    function _exactInputParams(PoolKey memory key, address inputToken, int256 amountSpecified)
+        internal
+        pure
+        returns (SwapParams memory)
+    {
+        bool zeroForOne = Currency.unwrap(key.currency0) == inputToken;
+        return SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -amountSpecified,
+            sqrtPriceLimitX96: zeroForOne
+                ? uint160(4295128740)
+                : uint160(1461446703485210103287273052203988822378723970341)
+        });
     }
 
     function _poolKey(address tokenA, address tokenB, AquaUniV4Hook hook) internal pure returns (PoolKey memory) {
@@ -102,10 +208,12 @@ contract BaseForkAquaUniV4HookTest is Test {
 
 contract AquaHookCreate2Deployer {
     function findSalt(IAqua aqua, address poolManager) external view returns (bytes32 salt) {
-        bytes32 bytecodeHash = keccak256(abi.encodePacked(type(AquaUniV4Hook).creationCode, abi.encode(aqua, poolManager)));
+        bytes32 bytecodeHash =
+            keccak256(abi.encodePacked(type(AquaUniV4Hook).creationCode, abi.encode(aqua, poolManager)));
         for (uint256 i = 0; i < 300_000; i++) {
             salt = bytes32(i);
-            address predicted = address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
+            address predicted =
+                address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, bytecodeHash)))));
             if (uint160(predicted) & Hooks.ALL_HOOK_MASK == Hooks.BEFORE_SWAP_FLAG) return salt;
         }
         revert("salt not found");
@@ -127,7 +235,66 @@ contract AquaHookCreate2Deployer {
     }
 }
 
-contract MockERC20 {
+contract BaseForkAquaFundedSwapRouter {
+    using CurrencySettler for Currency;
+
+    IPoolManager public immutable manager;
+
+    constructor(IPoolManager manager_) {
+        manager = manager_;
+    }
+
+    function swap(PoolKey memory key, SwapParams memory params, address recipient, bytes memory hookData)
+        external
+        returns (BalanceDelta delta)
+    {
+        delta = abi.decode(manager.unlock(abi.encode(uint8(1), key, params, recipient, hookData)), (BalanceDelta));
+    }
+
+    function modifyLiquidity(PoolKey memory key, ModifyLiquidityParams memory params, bytes memory hookData)
+        external
+        returns (BalanceDelta delta)
+    {
+        delta = abi.decode(manager.unlock(abi.encode(uint8(2), key, params, hookData)), (BalanceDelta));
+    }
+
+    function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
+        require(msg.sender == address(manager), "BaseForkAquaFundedSwapRouter: only manager");
+        uint8 action = abi.decode(rawData[:32], (uint8));
+
+        if (action == 2) {
+            (, PoolKey memory liqKey, ModifyLiquidityParams memory liqParams, bytes memory liqHookData) =
+                abi.decode(rawData, (uint8, PoolKey, ModifyLiquidityParams, bytes));
+            (BalanceDelta liqDelta,) = manager.modifyLiquidity(liqKey, liqParams, liqHookData);
+            _settleOrTake(liqKey, liqDelta, address(this));
+            return abi.encode(liqDelta);
+        }
+
+        (, PoolKey memory swapKey, SwapParams memory swapParams, address recipient, bytes memory swapHookData) =
+            abi.decode(rawData, (uint8, PoolKey, SwapParams, address, bytes));
+        BalanceDelta swapDelta = manager.swap(swapKey, swapParams, swapHookData);
+        _settleOrTake(swapKey, swapDelta, recipient);
+        return abi.encode(swapDelta);
+    }
+
+    function _settleOrTake(PoolKey memory key, BalanceDelta delta, address recipient) internal {
+        if (delta.amount0() < 0) {
+            key.currency0.settle(manager, address(this), uint256(uint128(-delta.amount0())), false);
+        }
+        if (delta.amount1() < 0) {
+            key.currency1.settle(manager, address(this), uint256(uint128(-delta.amount1())), false);
+        }
+        if (delta.amount0() > 0) key.currency0.take(manager, recipient, uint256(uint128(delta.amount0())), false);
+        if (delta.amount1() > 0) key.currency1.take(manager, recipient, uint256(uint128(delta.amount1())), false);
+    }
+}
+
+interface IERC20Like {
+    function balanceOf(address account) external view returns (uint256);
+    function approve(address spender, uint256 amount) external returns (bool);
+}
+
+contract BaseForkMockERC20 {
     string public name;
     string public symbol;
     uint8 public constant decimals = 18;
@@ -147,6 +314,13 @@ contract MockERC20 {
 
     function approve(address spender, uint256 amount) external returns (bool) {
         allowance[msg.sender][spender] = amount;
+        return true;
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        require(balanceOf[msg.sender] >= amount, "ERC20: insufficient balance");
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
         return true;
     }
 
