@@ -103,7 +103,7 @@ The key tests are:
 | Base fork USDC/WETH + USDC/HYDX swap proof | Base fork uses live Aqua + live v4 PoolManager + real Base USDC/WETH + local HYDX across two pools |
 | Registered-routing guard | callers cannot override the pool's registered Aqua route |
 
-## Base fork proof
+## Base fork test
 
 The Base fork test uses:
 
